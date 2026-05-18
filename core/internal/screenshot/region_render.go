@@ -51,16 +51,29 @@ var DefaultOverlayStyle = OverlayStyle{
 	AccentR: 100, AccentG: 180, AccentB: 255,
 }
 
-func (r *RegionSelector) drawOverlay(os *OutputSurface, renderBuf *ShmBuffer) {
-	data := renderBuf.Data()
-	stride := renderBuf.Stride
-	w, h := renderBuf.Width, renderBuf.Height
-	format := os.screenFormat
+func createDimmedBufferCopy(src *ShmBuffer) (*ShmBuffer, error) {
+	dst, err := CreateShmBuffer(src.Width, src.Height, src.Stride)
+	if err != nil {
+		return nil, err
+	}
+	dst.CopyFrom(src)
+	dimBuffer(dst)
+	return dst, nil
+}
 
-	// Dim the entire buffer
-	for y := 0; y < h; y++ {
-		off := y * stride
-		for x := 0; x < w; x++ {
+func createDimmedBufferCopyOrNil(src *ShmBuffer) *ShmBuffer {
+	dst, err := createDimmedBufferCopy(src)
+	if err != nil {
+		return nil
+	}
+	return dst
+}
+
+func dimBuffer(buf *ShmBuffer) {
+	data := buf.Data()
+	for y := 0; y < buf.Height; y++ {
+		off := y * buf.Stride
+		for x := 0; x < buf.Width; x++ {
 			i := off + x*4
 			if i+3 >= len(data) {
 				continue
@@ -69,6 +82,17 @@ func (r *RegionSelector) drawOverlay(os *OutputSurface, renderBuf *ShmBuffer) {
 			data[i+1] = uint8(int(data[i+1]) * 3 / 5)
 			data[i+2] = uint8(int(data[i+2]) * 3 / 5)
 		}
+	}
+}
+
+func (r *RegionSelector) drawOverlay(os *OutputSurface, renderBuf *ShmBuffer, dim bool) {
+	data := renderBuf.Data()
+	stride := renderBuf.Stride
+	w, h := renderBuf.Width, renderBuf.Height
+	format := os.screenFormat
+
+	if dim {
+		dimBuffer(renderBuf)
 	}
 
 	r.drawHUD(data, stride, w, h, format)

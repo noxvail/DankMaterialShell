@@ -38,6 +38,8 @@ type OutputSurface struct {
 	viewport          *wp_viewporter.WpViewport
 	screenBuf         *ShmBuffer
 	screenBufNoCursor *ShmBuffer
+	dimmedBuf         *ShmBuffer
+	dimmedBufNoCursor *ShmBuffer
 	screenFormat      uint32
 	logicalW          int
 	logicalH          int
@@ -45,8 +47,9 @@ type OutputSurface struct {
 	yInverted         bool
 
 	// Triple-buffered render slots
-	slots      [3]*RenderSlot
-	slotsReady bool
+	slots       [3]*RenderSlot
+	slotsReady  bool
+	needsRedraw bool
 }
 
 type PreCapture struct {
@@ -170,6 +173,7 @@ func (r *RegionSelector) Run() (*CaptureResult, bool, error) {
 		if err := r.ctx.Dispatch(); err != nil {
 			return nil, false, fmt.Errorf("dispatch: %w", err)
 		}
+		r.flushRedraws()
 	}
 
 	if r.cancelled || r.capturedBuffer == nil {
@@ -673,6 +677,11 @@ func (r *RegionSelector) initRenderBuffer(os *OutputSurface) {
 		return
 	}
 
+	os.dimmedBuf = createDimmedBufferCopyOrNil(os.screenBuf)
+	if os.screenBufNoCursor != nil {
+		os.dimmedBufNoCursor = createDimmedBufferCopyOrNil(os.screenBufNoCursor)
+	}
+
 	for i := 0; i < 3; i++ {
 		slot := &RenderSlot{}
 
@@ -753,6 +762,13 @@ func (r *RegionSelector) getSourceBuffer(os *OutputSurface) *ShmBuffer {
 	return os.screenBuf
 }
 
+func (r *RegionSelector) getDimmedBuffer(os *OutputSurface) *ShmBuffer {
+	if !r.showCapturedCursor && os.dimmedBufNoCursor != nil {
+		return os.dimmedBufNoCursor
+	}
+	return os.dimmedBuf
+}
+
 func (r *RegionSelector) redrawSurface(os *OutputSurface) {
 	srcBuf := r.getSourceBuffer(os)
 	if srcBuf == nil || !os.slotsReady {
@@ -761,13 +777,20 @@ func (r *RegionSelector) redrawSurface(os *OutputSurface) {
 
 	slot := os.acquireFreeSlot()
 	if slot == nil {
+		os.needsRedraw = true
 		return
 	}
+	os.needsRedraw = false
 
-	slot.shm.CopyFrom(srcBuf)
+	baseBuf := r.getDimmedBuffer(os)
+	dimBackground := false
+	if baseBuf == nil {
+		baseBuf = srcBuf
+		dimBackground = true
+	}
 
-	// Draw overlay (dimming + selection) into this slot
-	r.drawOverlay(os, slot.shm)
+	slot.shm.CopyFrom(baseBuf)
+	r.drawOverlay(os, slot.shm, dimBackground)
 
 	if os.viewport != nil {
 		_ = os.wlSurface.SetBufferScale(1)
@@ -787,6 +810,15 @@ func (r *RegionSelector) redrawSurface(os *OutputSurface) {
 
 	// Mark this slot as busy until compositor releases it
 	slot.busy = true
+}
+
+func (r *RegionSelector) flushRedraws() {
+	for _, os := range r.surfaces {
+		if !os.needsRedraw {
+			continue
+		}
+		r.redrawSurface(os)
+	}
 }
 
 func (r *RegionSelector) cleanup() {
@@ -832,6 +864,12 @@ func (r *RegionSelector) cleanup() {
 		}
 		if os.screenBufNoCursor != nil {
 			os.screenBufNoCursor.Close()
+		}
+		if os.dimmedBuf != nil {
+			os.dimmedBuf.Close()
+		}
+		if os.dimmedBufNoCursor != nil {
+			os.dimmedBufNoCursor.Close()
 		}
 	}
 
